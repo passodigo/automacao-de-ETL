@@ -156,8 +156,7 @@ if uploaded_file is None:
         st.subheader("Tabelas já adicionadas nesta sessão")
         for i, item in enumerate(st.session_state.consolidado):
             df_preview = get_df(item)
-            origem = item.get("origem", "[Comitês x Programas]")
-            st.write(f"**{i+1}. {origem}** — {df_preview.shape[0]} linhas x {df_preview.shape[1]} colunas")
+            st.write(f"**{i+1}. {item['origem']}** — {df_preview.shape[0]} linhas x {df_preview.shape[1]} colunas")
     st.stop()
 
 pdf_bytes = uploaded_file.read()
@@ -171,7 +170,42 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
     )
 
     page = pdf.pages[pagina_num - 1]
-    found_tables = page.find_tables()
+
+    ESTRATEGIAS = {
+        "Automática (por linhas/bordas)": {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+        "Baseada em texto (sem bordas)": {"vertical_strategy": "text", "horizontal_strategy": "text"},
+        "Híbrida (linhas verticais + texto horizontal)": {"vertical_strategy": "lines", "horizontal_strategy": "text"},
+    }
+
+    if "estrategia_deteccao" not in st.session_state:
+        st.session_state.estrategia_deteccao = "Automática (por linhas/bordas)"
+
+    estrategia_nome = st.sidebar.selectbox(
+        "Estratégia de detecção de tabela",
+        list(ESTRATEGIAS.keys()),
+        index=list(ESTRATEGIAS.keys()).index(st.session_state.estrategia_deteccao),
+        help="Se a tabela não tem bordas desenhadas (só cor de fundo), tente "
+             "'Baseada em texto'. Se algumas colunas ficarem grudadas, tente 'Híbrida'.",
+    )
+    st.session_state.estrategia_deteccao = estrategia_nome
+
+    found_tables = page.find_tables(table_settings=ESTRATEGIAS[estrategia_nome])
+
+    # fallback automático: se a estratégia escolhida não achou nada, testa as outras
+    if not found_tables:
+        st.warning(f"Nenhuma tabela encontrada com a estratégia '{estrategia_nome}'.")
+        for nome_alt, settings_alt in ESTRATEGIAS.items():
+            if nome_alt == estrategia_nome:
+                continue
+            tentativa = page.find_tables(table_settings=settings_alt)
+            if tentativa:
+                st.info(
+                    f"🔎 A estratégia **'{nome_alt}'** encontrou {len(tentativa)} tabela(s) "
+                    f"nesta página. Clique abaixo para usar essa estratégia."
+                )
+                if st.button(f"Usar estratégia '{nome_alt}'", key=f"usar_{nome_alt}"):
+                    st.session_state.estrategia_deteccao = nome_alt
+                    st.rerun()
 
     raw_tables = []
     opcoes = []
@@ -377,7 +411,9 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 "comite_col": comite_col,
                 "programa_cols": programa_cols,
                 "ano": ano_input,
-                "origem": f"[Comitês x Programas] {uploaded_file.name} (pág. {pagina_num}, tabela {escolha_idx + 1})",
+                "arquivo_origem": uploaded_file.name,
+                "pagina_origem": pagina_num,
+                "origem": f"[Comitê x Programa] {uploaded_file.name} (pág. {pagina_num}, tabela {escolha_idx + 1}) — Ano {ano_input}",
             })
             st.success("Tabela despivotada e adicionada!")
             st.rerun()
@@ -394,8 +430,7 @@ else:
     for i, item in enumerate(st.session_state.consolidado):
         c1, c2, c3 = st.columns([4, 1.3, 1])
         with c1:
-            origem = item.get("origem", "[Comitês x Programas]")
-            st.write(f"**{i + 1}. {origem}**")
+            st.write(f"**{i + 1}. {item['origem']}**")
         with c2:
             if item["tipo"] == "comite_programa":
                 novo_ano = st.number_input(
