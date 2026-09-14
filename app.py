@@ -9,24 +9,21 @@ Dois modos, na barra lateral:
 
   2) Comitês x Programas (despivotar) — seção dedicada para tabelas em
      formato "matriz" (Comitê nas linhas, Programa nas colunas). Gera
-     formato linear: Comitê | Programa | Ano | Valor.
+     formato linear: Comitê | Programa | Ano | Valor. E salva no SQLite!
 
 PONTOS IMPORTANTES DESTA VERSÃO
 --------------------------------
-- Muitas tabelas de PDF têm CABEÇALHO EM MAIS DE UMA LINHA (ex: uma linha
-  com "Programa de Investimento" mesclada em cima, e a linha de baixo com
-  "Comitê", "P1", "P2"...). O app agora mostra a tabela crua (sem assumir
-  qual linha é o cabeçalho) e deixa você escolher qual linha é o cabeçalho
-  real. Isso evita o cabeçalho errado virar "dado" (e gerar lixo).
-- No modo Comitê x Programa, dá pra excluir linhas específicas (ex: "Total
-  por Programa") antes de despivotar, além de excluir tabelas inteiras na
-  etapa de seleção.
-- O campo Ano fica vinculado ao lote inteiro: editar depois de adicionado
-  recalcula automaticamente todas as linhas daquele lote.
+- SELEÇÃO VISUAL (CROP): Agora você delimita a tabela desenhando um 
+  quadrado na tela com o mouse!
+- COMITÊS SEM INVESTIMENTO: Valores vazios ou com tracinhos (-) agora
+  são registrados como 0.0 em vez de serem ignorados. Assim, todos os 
+  comitês aparecem no banco de dados e no Excel.
+- O campo Ano fica vinculado ao lote inteiro e atualiza automaticamente.
+- INTEGRAÇÃO COM BANCO DE DADOS (SQLite) ativa para a despivotagem.
 
 COMO RODAR
 ----------
-    pip install streamlit pdfplumber pandas openpyxl Pillow
+    pip install streamlit pdfplumber pandas openpyxl Pillow streamlit-cropper
     streamlit run app.py
 ================================================================================
 """
@@ -34,11 +31,13 @@ COMO RODAR
 import io
 import re
 from datetime import datetime
-
+from db_setup import inicializar_banco, get_connection, DB_PATH
 import pandas as pd
 import pdfplumber
 import streamlit as st
+from streamlit_cropper import st_cropper
 
+inicializar_banco()  # garante que o banco e as tabelas existem
 st.set_page_config(page_title="PDF -> Excel", layout="wide")
 
 # ==============================================================================
@@ -56,15 +55,15 @@ def normalize(s: str) -> str:
 
 
 def parse_valor_brl(v):
-    """Converte '62.805.187' ou '218.426,50' -> float. '-' ou vazio -> None."""
+    """Converte valores em texto para float. Tracinhos ou vazio viram 0.0."""
     if v is None:
-        return None
+        return 0.0
     s = str(v).strip()
     if s == "" or s in ("-", "—", "–", "nan", "None"):
-        return None
+        return 0.0
     s = re.sub(r"[^\d,.\-]", "", s)
     if s in ("", "-"):
-        return None
+        return 0.0
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     else:
@@ -74,20 +73,16 @@ def parse_valor_brl(v):
     try:
         return float(s)
     except ValueError:
-        return None
+        return 0.0
 
 
 def extract_programa_label(col_name: str) -> str:
-    """Mantém o nome da coluna como está (ex: 'P1' continua 'P1')."""
     return str(col_name).strip()
 
 
 def build_header_and_df(raw_rows: list, header_row_idx: int) -> pd.DataFrame:
-    """Constrói o DataFrame a partir das linhas cruas, usando a linha
-    header_row_idx como cabeçalho e descartando tudo antes/dela."""
     header = raw_rows[header_row_idx]
     header = [str(h).strip() if h else f"coluna_{i}" for i, h in enumerate(header)]
-    # garante nomes únicos (colunas mescladas podem repetir texto)
     seen = {}
     header_unicos = []
     for h in header:
@@ -104,8 +99,6 @@ def build_header_and_df(raw_rows: list, header_row_idx: int) -> pd.DataFrame:
 
 
 def get_df(item: dict) -> pd.DataFrame:
-    """Retorna o DataFrame final de um item do conjunto, recalculando na hora
-    para o caso de 'comite_programa' (assim o Ano editado sempre reflete)."""
     if item["tipo"] == "generico":
         return item["df"]
 
@@ -117,12 +110,12 @@ def get_df(item: dict) -> pd.DataFrame:
     linhas = []
     for _, row in raw_df.iterrows():
         comite = row.get(comite_col)
+        # Ignora a linha toda apenas se o nome do comitê estiver vazio
         if comite is None or str(comite).strip() == "" or str(comite).strip() == "-":
             continue
         for col in programa_cols:
             valor = parse_valor_brl(row.get(col))
-            if valor is None:
-                continue
+            # Não ignoramos mais os valores nulos; eles entram como 0.0
             linhas.append({
                 "Comitê": str(comite).strip(),
                 "Programa": extract_programa_label(col),
@@ -135,9 +128,43 @@ def get_df(item: dict) -> pd.DataFrame:
     df["_pagina_origem"] = item.get("pagina_origem", "")
     return df
 
+# ==============================================================================
+# FUNÇÕES DE BANCO DE DADOS
+# ==============================================================================
+def get_ou_criar_comite(conn, nome_comite: str) -> int:
+    nome = str(nome_comite).strip().upper()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM comite WHERE nome = ?", (nome,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    
+    cur.execute("INSERT INTO comite (nome) VALUES (?)", (nome,))
+    return cur.lastrowid
+
+def get_ou_criar_programa(conn, codigo_programa: str) -> int:
+    codigo = str(codigo_programa).strip().upper()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM programa WHERE codigo = ?", (codigo,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    
+    cur.execute("INSERT INTO programa (codigo) VALUES (?)", (codigo,))
+    return cur.lastrowid
+
+def get_ou_criar_exercicio(conn, ano: int) -> int:
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM exercicio WHERE ano = ?", (ano,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    
+    cur.execute("INSERT INTO exercicio (ano) VALUES (?)", (ano,))
+    return cur.lastrowid
 
 # ==============================================================================
-# SIDEBAR
+# SIDEBAR E LEITURA DO PDF
 # ==============================================================================
 st.sidebar.header("Modo de extração")
 modo = st.sidebar.radio(
@@ -171,117 +198,115 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
 
     page = pdf.pages[pagina_num - 1]
 
-    ESTRATEGIAS = {
-        "Automática (por linhas/bordas)": {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
-        "Baseada em texto (sem bordas)": {"vertical_strategy": "text", "horizontal_strategy": "text"},
-        "Híbrida (linhas verticais + texto horizontal)": {"vertical_strategy": "lines", "horizontal_strategy": "text"},
-    }
-
-    if "estrategia_deteccao" not in st.session_state:
-        st.session_state.estrategia_deteccao = "Automática (por linhas/bordas)"
-
-    estrategia_nome = st.sidebar.selectbox(
-        "Estratégia de detecção de tabela",
-        list(ESTRATEGIAS.keys()),
-        index=list(ESTRATEGIAS.keys()).index(st.session_state.estrategia_deteccao),
-        help="Se a tabela não tem bordas desenhadas (só cor de fundo), tente "
-             "'Baseada em texto'. Se algumas colunas ficarem grudadas, tente 'Híbrida'.",
+    # ==========================================================================
+    # CROP VISUAL DA TABELA
+    # ==========================================================================
+    st.markdown("---")
+    st.markdown("### 3. Delimite a Tabela na Página")
+    st.caption(
+        "Desenhe um retângulo no quadro abaixo com o mouse, envolvendo **apenas** a tabela "
+        "que você quer extrair (ignore títulos, textos soltos e cabeçalhos da página)."
     )
-    st.session_state.estrategia_deteccao = estrategia_nome
+    
+    col_crop, col_selecao = st.columns([1.3, 1])
 
-    found_tables = page.find_tables(table_settings=ESTRATEGIAS[estrategia_nome])
+    with col_crop:
+        resolucao_dpi = 150
+        pil_image = page.to_image(resolution=resolucao_dpi).original
+        
+        box = st_cropper(pil_image, realtime_update=True, box_color='#FF0000', aspect_ratio=None, return_type='box')
+        
+        fator_escala = 72.0 / resolucao_dpi
+        left = box['left'] * fator_escala
+        top = box['top'] * fator_escala
+        width = box['width'] * fator_escala
+        height = box['height'] * fator_escala
 
-    # fallback automático: se a estratégia escolhida não achou nada, testa as outras
-    if not found_tables:
-        st.warning(f"Nenhuma tabela encontrada com a estratégia '{estrategia_nome}'.")
-        for nome_alt, settings_alt in ESTRATEGIAS.items():
-            if nome_alt == estrategia_nome:
-                continue
-            tentativa = page.find_tables(table_settings=settings_alt)
-            if tentativa:
-                st.info(
-                    f"🔎 A estratégia **'{nome_alt}'** encontrou {len(tentativa)} tabela(s) "
-                    f"nesta página. Clique abaixo para usar essa estratégia."
-                )
-                if st.button(f"Usar estratégia '{nome_alt}'", key=f"usar_{nome_alt}"):
-                    st.session_state.estrategia_deteccao = nome_alt
-                    st.rerun()
-
-    raw_tables = []
-    opcoes = []
-    for idx, t in enumerate(found_tables):
-        raw = t.extract()
-        if not raw or len(raw) < 1:
-            continue
-        raw_tables.append(raw)
-        n_cols = max(len(r) for r in raw)
-        opcoes.append(f"Tabela {idx + 1} — {len(raw)} linhas x {n_cols} colunas (bruto)")
-
-    df_selecionado = None
-    escolha_idx = None
-
-    col_preview, col_selecao = st.columns([1.3, 1])
-
-    with col_preview:
-        st.subheader(f"Página {pagina_num} de {total_paginas}")
-        im = page.to_image(resolution=150)
-        if found_tables:
-            im.draw_rects([t.bbox for t in found_tables], stroke="red", stroke_width=3)
-        st.image(im.original, use_container_width=True, caption="Tabelas detectadas destacadas em vermelho")
+        if width > 10 and height > 10:
+            crop_bbox = (left, top, left + width, top + height)
+            try:
+                page_cropped = page.crop(crop_bbox)
+            except Exception as e:
+                st.warning(f"Erro ao cortar a página: {e}")
+                page_cropped = page
+        else:
+            page_cropped = page
 
     with col_selecao:
-        st.subheader("3. Selecione a tabela")
+        st.subheader("4. Seleção e Extração")
+        
+        estrategia_nome = st.selectbox(
+            "Estratégia de detecção",
+            ["Automática (por linhas/bordas)", "Baseada em texto (sem bordas)", "Híbrida (linhas verticais + texto horizontal)"],
+            help="Como você já cortou a tabela, 'Baseada em texto' ou 'Híbrida' devem funcionar bem."
+        )
 
-        if not opcoes:
-            st.warning("Nenhuma tabela detectada automaticamente nesta página.")
-        else:
-            tabelas_consideradas = st.multiselect(
-                "Tabelas consideradas (desmarque para excluir):",
-                opcoes,
-                default=opcoes,
+        tolerancia = 3.0
+        if "texto" in estrategia_nome.lower() or "híbrida" in estrategia_nome.lower():
+            tolerancia = st.slider(
+                "Juntar letras separadas (Tolerância X)", 
+                min_value=1.0, max_value=15.0, value=3.0, step=0.5,
+                help="Se as palavras do cabeçalho estiverem quebrando em várias colunas (ex: P R O G R A), aumente esse número."
             )
 
-            if not tabelas_consideradas:
-                st.warning("Todas as tabelas foram excluídas. Marque ao menos uma para continuar.")
-            else:
-                escolha = st.radio("Qual tabela extrair?", tabelas_consideradas, index=0)
+        ESTRATEGIAS = {
+            "Automática (por linhas/bordas)": {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+            "Baseada em texto (sem bordas)": {"vertical_strategy": "text", "horizontal_strategy": "text", "text_x_tolerance": tolerancia},
+            "Híbrida (linhas verticais + texto horizontal)": {"vertical_strategy": "lines", "horizontal_strategy": "text", "text_x_tolerance": tolerancia},
+        }
+
+        found_tables = page_cropped.find_tables(table_settings=ESTRATEGIAS[estrategia_nome])
+
+        if not found_tables:
+            st.warning("Nenhuma tabela encontrada na área selecionada.")
+        
+        raw_tables = []
+        opcoes = []
+        for idx, t in enumerate(found_tables):
+            raw = t.extract()
+            if not raw or len(raw) < 1:
+                continue
+            raw_tables.append(raw)
+            n_cols = max(len(r) for r in raw)
+            opcoes.append(f"Tabela {idx + 1} — {len(raw)} linhas x {n_cols} colunas")
+
+        df_selecionado = None
+        escolha_idx = None
+
+        if opcoes:
+            tabelas_consideradas = st.multiselect("Tabelas encontradas na área:", opcoes, default=opcoes)
+
+            if tabelas_consideradas:
+                escolha = st.radio("Qual extrair?", tabelas_consideradas, index=0, label_visibility="collapsed")
                 escolha_idx = opcoes.index(escolha)
                 raw_selecionado = raw_tables[escolha_idx]
 
-                st.caption("Prévia BRUTA (sem assumir cabeçalho ainda) — primeiras linhas:")
-                st.dataframe(pd.DataFrame(raw_selecionado[:8]), use_container_width=True)
+                st.caption("Prévia BRUTA (todas as linhas):")
+                st.dataframe(pd.DataFrame(raw_selecionado), use_container_width=True)
 
                 max_idx = len(raw_selecionado) - 1
                 header_row_idx = st.number_input(
-                    "Qual linha (0 = primeira linha acima) contém os nomes REAIS das colunas?",
+                    "Qual linha (0 = primeira linha) contém os nomes REAIS das colunas?",
                     min_value=0, max_value=max_idx, value=0,
-                    help="Se a tabela tem cabeçalho mesclado em duas linhas (ex: um título "
-                         "geral em cima e os nomes das colunas embaixo), escolha o índice "
-                         "da linha de baixo, que é a que tem os nomes de verdade.",
                 )
 
-                # ---- edição manual do cabeçalho, para corrigir desalinhamentos ----
                 raw_header = raw_selecionado[header_row_idx]
                 n_cols_dados = max(len(r) for r in raw_selecionado[header_row_idx + 1:]) if len(raw_selecionado) > header_row_idx + 1 else len(raw_header)
                 n_cols = max(len(raw_header), n_cols_dados)
                 raw_header = list(raw_header) + [""] * (n_cols - len(raw_header))
 
-                st.caption(
-                    "Confira/edite os nomes de coluna abaixo antes de continuar "
-                    "(corrija aqui se algum nome vier errado ou desalinhado):"
-                )
+                st.caption("Confira/edite os nomes de coluna (corrija se houver desalinhamento):")
                 header_editado = []
-                cols_header_widget = st.columns(4)
+                cols_header_widget = st.columns(3)
                 for i, h in enumerate(raw_header):
                     default_val = str(h).strip() if h else f"coluna_{i}"
-                    with cols_header_widget[i % 4]:
+                    with cols_header_widget[i % 3]:
                         val = st.text_input(
                             f"Coluna {i}", value=default_val,
                             key=f"header_{pagina_num}_{escolha_idx}_{header_row_idx}_{i}",
                         )
                     header_editado.append(val)
 
-                # garante nomes únicos mesmo após edição manual
                 seen = {}
                 header_final = []
                 for h in header_editado:
@@ -293,24 +318,18 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                         header_final.append(h)
 
                 data_rows = raw_selecionado[header_row_idx + 1:]
-                data_rows_ajustadas = [
-                    list(r) + [None] * (n_cols - len(r)) for r in data_rows
-                ]
+                data_rows_ajustadas = [list(r) + [None] * (n_cols - len(r)) for r in data_rows]
                 df_selecionado = pd.DataFrame(data_rows_ajustadas, columns=header_final).dropna(how="all")
 
                 st.caption("Prévia já com cabeçalho aplicado:")
-                st.dataframe(df_selecionado.head(6), use_container_width=True)
+                st.dataframe(df_selecionado.head(10), use_container_width=True)
 
     # ==========================================================================
     # MODO 1: ETL GENÉRICO
     # ==========================================================================
     if modo.startswith("ETL Genérico") and df_selecionado is not None:
         st.divider()
-        st.subheader("4. Confira e ajuste as colunas (opcional)")
-        st.caption(
-            "Renomeie para nomes padronizados se quiser manter consistência entre "
-            "anos diferentes. O app lembra renomeações já feitas e sugere de novo."
-        )
+        st.subheader("5. Confira e ajuste as colunas (opcional)")
 
         novos_nomes = {}
         cols_widget = st.columns(min(len(df_selecionado.columns), 4) or 1)
@@ -346,10 +365,9 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
     # ==========================================================================
     elif modo.startswith("Comitês") and df_selecionado is not None:
         st.divider()
-        st.subheader("4. Configure a despivotagem")
+        st.subheader("5. Configure a despivotagem")
 
         colunas_disponiveis = list(df_selecionado.columns)
-
         comite_col = st.selectbox("Qual coluna é o Comitê?", colunas_disponiveis, index=0)
 
         sugestao_programa = [
@@ -362,7 +380,6 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             default=sugestao_programa,
         )
 
-        # ---- exclusão de linhas específicas (ex: "Total por Programa") ----
         comites_unicos = [
             str(v).strip() for v in df_selecionado[comite_col].dropna().unique()
             if str(v).strip() not in ("", "-")
@@ -405,6 +422,36 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             type="primary",
             disabled=not (programa_cols and comites_incluidos),
         ):
+            try:
+                conn = get_connection()
+                exercicio_id = get_ou_criar_exercicio(conn, ano_input)
+                df_para_salvar = get_df(preview_item) 
+                
+                cur = conn.cursor()
+                for _, row in df_para_salvar.iterrows():
+                    comite_nome = row["Comitê"]
+                    programa_codigo = row["Programa"]
+                    valor = row["Valor"]
+                    
+                    comite_id = get_ou_criar_comite(conn, comite_nome)
+                    programa_id = get_ou_criar_programa(conn, programa_codigo)
+                    
+                    cur.execute("""
+                        INSERT INTO investimento (comite_id, programa_id, exercicio_id, valor)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(comite_id, programa_id, exercicio_id) 
+                        DO UPDATE SET valor = excluded.valor
+                    """, (comite_id, programa_id, exercicio_id, float(valor)))
+                
+                conn.commit()
+                st.toast("✅ Dados salvos com sucesso no banco de dados!")
+                
+            except Exception as e:
+                st.error(f"Erro ao salvar no banco: {e}")
+            finally:
+                if 'conn' in locals():
+                    conn.close()
+
             st.session_state.consolidado.append({
                 "tipo": "comite_programa",
                 "raw_df": df_filtrado,
@@ -422,7 +469,7 @@ with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
 # CONJUNTO FINAL / EXPORTAÇÃO
 # ==============================================================================
 st.divider()
-st.header("5. Conjunto final")
+st.header("6. Conjunto final")
 
 if not st.session_state.consolidado:
     st.info("Nenhuma tabela adicionada ainda.")
