@@ -16,10 +16,18 @@ PONTOS IMPORTANTES DESTA VERSÃO
 - EXTRAÇÃO VIA DOCLING: a detecção e reconstrução da estrutura da tabela
   agora usa o Docling (modelo TableFormer), em vez do pdfplumber. Isso
   resolve boa parte dos problemas de células mescladas, cabeçalhos em
-  duas linhas e tabelas sem bordas desenhadas (só cor de fundo) — que
-  antes exigiam crop manual + escolha de estratégia de detecção.
+  duas linhas e tabelas sem bordas desenhadas (só cor de fundo).
   O pdfplumber continua sendo usado só para renderizar a IMAGEM da
   página como referência visual (não participa mais da extração).
+- MODO ACCURATE: o Docling roda com TableFormerMode.ACCURATE (em vez do
+  padrão FAST). É mais lento, mas detecta bem melhor páginas com VÁRIAS
+  tabelas próximas umas das outras (o modo FAST às vezes funde ou
+  descarta tabelas menores nesse cenário).
+- REFORÇO MANUAL POR CROP: se ainda assim o Docling não pegar alguma
+  tabela da página, dá pra desenhar um recorte manual só naquela área —
+  o recorte também é processado pelo Docling (não pelo pdfplumber), então
+  o motor de extração continua sendo 100% Docling; o crop só serve pra
+  apontar onde ele deve reanalisar.
 - COMITÊS SEM INVESTIMENTO: valores vazios ou com tracinhos (-) são
   registrados como 0.0 em vez de serem ignorados. Assim, todos os
   comitês aparecem no banco de dados e no Excel.
@@ -28,7 +36,7 @@ PONTOS IMPORTANTES DESTA VERSÃO
 
 COMO RODAR
 ----------
-    pip install streamlit docling pdfplumber pandas openpyxl Pillow
+    pip install streamlit docling pdfplumber pypdf streamlit-cropper pandas openpyxl Pillow
     streamlit run app.py
 
 OBS: a primeira conversão de cada PDF com o Docling pode demorar alguns
@@ -44,8 +52,11 @@ from db_setup import inicializar_banco, get_connection, DB_PATH
 import pandas as pd
 import pdfplumber
 import streamlit as st
-from docling.document_converter import DocumentConverter
-from docling.datamodel.base_models import DocumentStream
+from pypdf import PdfReader, PdfWriter
+from streamlit_cropper import st_cropper
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
 
 inicializar_banco()  # garante que o banco e as tabelas existem
 st.set_page_config(page_title="PDF -> Excel", layout="wide")
@@ -172,8 +183,20 @@ def get_ou_criar_exercicio(conn, ano: int) -> int:
 @st.cache_resource
 def get_docling_converter() -> DocumentConverter:
     """O conversor carrega modelos pesados (layout + estrutura de tabela).
-    Cacheado como 'resource' pra não recarregar isso a cada interação."""
-    return DocumentConverter()
+    Cacheado como 'resource' pra não recarregar isso a cada interação.
+
+    Usa TableFormerMode.ACCURATE em vez do padrão FAST: é mais lento, mas
+    detecta bem melhor páginas com várias tabelas próximas (o modo FAST
+    tende a fundir ou descartar as menores nesse cenário)."""
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_table_structure = True
+    pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
 
 
 def converter_pdf_com_docling(pdf_bytes: bytes, nome_arquivo: str):
@@ -184,6 +207,39 @@ def converter_pdf_com_docling(pdf_bytes: bytes, nome_arquivo: str):
     source = DocumentStream(name=nome_arquivo, stream=io.BytesIO(pdf_bytes))
     resultado = converter.convert(source)
     return resultado.document
+
+
+def cropar_pagina_pdf(pdf_bytes: bytes, pagina_num: int, bbox_pdf: tuple) -> bytes:
+    """Gera um PDF de 1 página só com a área recortada (em pontos PDF,
+    origem no canto inferior esquerdo). Usado para reprocessar com o
+    Docling apenas a região que o usuário apontou manualmente."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    writer.add_page(reader.pages[pagina_num - 1])
+
+    x0, y0, x1, y1 = bbox_pdf
+    nova_pagina = writer.pages[0]
+    nova_pagina.mediabox.lower_left = (x0, y0)
+    nova_pagina.mediabox.upper_right = (x1, y1)
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def box_cropper_para_bbox_pdf(box: dict, resolucao_dpi: int, altura_pagina_pt: float) -> tuple:
+    """Converte a seleção do st_cropper (pixels, origem no topo-esquerda,
+    na resolução usada pra renderizar a imagem) para coordenadas PDF em
+    pontos (origem embaixo-à-esquerda, 72 pontos por polegada)."""
+    fator_escala = 72.0 / resolucao_dpi
+    x0 = box["left"] * fator_escala
+    x1 = (box["left"] + box["width"]) * fator_escala
+    topo_pt = box["top"] * fator_escala
+    base_pt = (box["top"] + box["height"]) * fator_escala
+    # inverte o eixo Y: PDF mede a partir de baixo, a imagem mede a partir de cima
+    y0 = altura_pagina_pt - base_pt
+    y1 = altura_pagina_pt - topo_pt
+    return (x0, y0, x1, y1)
 
 
 def docling_table_para_matriz(table) -> list[list[str]]:
@@ -255,28 +311,46 @@ pagina_num = st.sidebar.number_input(
     f"Página (1 a {total_paginas})", min_value=1, max_value=total_paginas, value=1
 )
 
+RESOLUCAO_PREVIEW_DPI = 150
+
+if "tabelas_extra_por_pagina" not in st.session_state:
+    # {(file_id, pagina_num): [matriz1, matriz2, ...]} — tabelas achadas via
+    # reforço manual (crop), fora do que o Docling detectou sozinho.
+    st.session_state.tabelas_extra_por_pagina = {}
+
 col_preview, col_selecao = st.columns([1.3, 1])
 
 with col_preview:
     st.subheader(f"Página {pagina_num} de {total_paginas}")
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf_preview:
         page_preview = pdf_preview.pages[pagina_num - 1]
-        im = page_preview.to_image(resolution=150)
-        st.image(im.original, use_container_width=True, caption="Referência visual da página (extração é feita pelo Docling)")
+        altura_pagina_pt = page_preview.height
+        im = page_preview.to_image(resolution=RESOLUCAO_PREVIEW_DPI)
+        pil_image = im.original
+        st.image(pil_image, use_container_width=True, caption="Referência visual da página (extração é feita pelo Docling)")
 
-tabelas_da_pagina = [t for t in docling_doc.tables if pagina_da_tabela(t) == pagina_num]
+# tabelas que o Docling encontrou sozinho, nessa página
+tabelas_docling = [
+    docling_table_para_matriz(t) for t in docling_doc.tables if pagina_da_tabela(t) == pagina_num
+]
+
+# tabelas encontradas via reforço manual (crop) em execuções anteriores desta sessão
+chave_extra = (file_id, pagina_num)
+tabelas_extra = st.session_state.tabelas_extra_por_pagina.get(chave_extra, [])
 
 with col_selecao:
     st.subheader("3. Selecione a tabela")
 
-    if not tabelas_da_pagina:
+    raw_tables = tabelas_docling + tabelas_extra
+    origem_tabelas = (["docling"] * len(tabelas_docling)) + (["reforço manual"] * len(tabelas_extra))
+
+    if not raw_tables:
         st.warning("O Docling não encontrou tabelas nesta página.")
-        raw_tables = []
         opcoes = []
     else:
-        raw_tables = [docling_table_para_matriz(t) for t in tabelas_da_pagina]
         opcoes = [
             f"Tabela {idx + 1} — {len(raw)} linhas x {max(len(r) for r in raw)} colunas"
+            + (" (reforço manual)" if origem_tabelas[idx] == "reforço manual" else "")
             for idx, raw in enumerate(raw_tables)
         ]
 
@@ -349,6 +423,53 @@ with col_selecao:
 
             st.caption("Prévia já com cabeçalho aplicado:")
             st.dataframe(df_selecionado.head(6), use_container_width=True)
+
+# ==============================================================================
+# REFORÇO MANUAL: crop de uma área da página, reprocessada pelo próprio Docling
+# ==============================================================================
+with st.expander("🔍 O Docling não achou todas as tabelas desta página? Recorte manualmente"):
+    st.caption(
+        "Desenhe um retângulo envolvendo APENAS a tabela que ficou faltando. Esse recorte "
+        "não é extraído por outra biblioteca — ele também é processado pelo Docling, só que "
+        "isolado, o que costuma resolver os casos de tabelas próximas demais umas das outras."
+    )
+
+    box = st_cropper(
+        pil_image,
+        realtime_update=True,
+        box_color="#FF0000",
+        aspect_ratio=None,
+        return_type="box",
+        key=f"cropper_{pagina_num}",
+    )
+
+    if st.button("↻ Reprocessar essa área com Docling", key=f"reprocessar_{pagina_num}"):
+        if box["width"] < 10 or box["height"] < 10:
+            st.warning("Selecione uma área maior antes de reprocessar.")
+        else:
+            bbox_pdf = box_cropper_para_bbox_pdf(box, RESOLUCAO_PREVIEW_DPI, altura_pagina_pt)
+            pdf_recortado = cropar_pagina_pdf(pdf_bytes, pagina_num, bbox_pdf)
+
+            with st.spinner("Reprocessando o recorte com Docling..."):
+                converter = get_docling_converter()
+                source_recorte = DocumentStream(
+                    name=f"{uploaded_file.name}_crop_p{pagina_num}", stream=io.BytesIO(pdf_recortado)
+                )
+                resultado_recorte = converter.convert(source_recorte)
+                doc_recortado = resultado_recorte.document
+
+            if not doc_recortado.tables:
+                st.warning("O Docling não encontrou nenhuma tabela dentro da área recortada.")
+            else:
+                novas_matrizes = [docling_table_para_matriz(t) for t in doc_recortado.tables]
+                st.session_state.tabelas_extra_por_pagina.setdefault(chave_extra, []).extend(novas_matrizes)
+                st.success(f"{len(novas_matrizes)} tabela(s) encontrada(s) no recorte e adicionada(s) à lista acima!")
+                st.rerun()
+
+    if tabelas_extra:
+        if st.button("🗑️ Limpar tabelas de reforço manual desta página", key=f"limpar_extra_{pagina_num}"):
+            st.session_state.tabelas_extra_por_pagina.pop(chave_extra, None)
+            st.rerun()
 
 # ==============================================================================
 # MODO 1: ETL GENÉRICO
