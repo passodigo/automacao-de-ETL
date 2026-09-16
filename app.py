@@ -85,7 +85,7 @@ def parse_valor_brl(v):
     elif "." in s:
         partes = s.split(".")
         if len(partes) > 2 or (len(partes) == 2 and len(partes[1]) == 3):
-            s = s.replace(".", "") # Trata como milhar (BR) ex: 333.758 -> 333758
+            s = s.replace(".", "") # Trata como milhar (BR)
             
     try:
         val = float(s)
@@ -94,18 +94,13 @@ def parse_valor_brl(v):
         return 0.0
 
 
-def aplicar_despivotagem(raw_df, comite_col, programa_cols, comites_incluidos, ano):
+def aplicar_despivotagem(raw_df, comite_col, programa_cols, comites_incluidos, ano, remover_zerados):
     """
-    Despivota a matriz perfeitamente usando pd.melt, garantindo que o cruzamento
-    Comitê X Programa leve o valor correto da tabela original.
+    Despivota a matriz perfeitamente usando pd.melt, agrupando por comitê e limpando vazios.
     """
-    # 1. Filtra as linhas (Comitês) selecionadas
     df_filtrado = raw_df[raw_df[comite_col].astype(str).str.strip().isin(comites_incluidos)].copy()
-    
-    # 2. Mantém apenas a coluna do Comitê e as colunas dos Programas escolhidos
     df_filtrado = df_filtrado[[comite_col] + programa_cols]
     
-    # 3. Faz o "Unpivot" mágico do Pandas
     df_linear = df_filtrado.melt(
         id_vars=[comite_col],
         value_vars=programa_cols,
@@ -113,15 +108,18 @@ def aplicar_despivotagem(raw_df, comite_col, programa_cols, comites_incluidos, a
         value_name='Valor_Cru'
     )
     
-    # 4. Limpeza e estruturação
     df_linear['Comitê'] = df_linear[comite_col].astype(str).str.strip()
     df_linear['Programa'] = df_linear['Programa'].astype(str).str.strip()
     df_linear['Ano'] = ano
-    
-    # 5. Aplica a conversão de BRL para garantir que '333.758' vire 333758.0
     df_linear['Valor'] = df_linear['Valor_Cru'].apply(parse_valor_brl)
     
-    # 6. Organiza as colunas de saída
+    # Ordena bonitinho para o Excel: Primeiro o Comitê, depois os programas dele
+    df_linear = df_linear.sort_values(by=['Comitê', 'Programa']).reset_index(drop=True)
+    
+    # Mágica que limpa o lixo visual e deixa só quem recebeu investimento
+    if remover_zerados:
+        df_linear = df_linear[df_linear['Valor'] != 0.0].reset_index(drop=True)
+        
     return df_linear[['Comitê', 'Programa', 'Ano', 'Valor']]
 
 
@@ -455,24 +453,29 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
         default=comites_unicos,
     )
 
-    ano_input = st.number_input("Ano de referência", min_value=1900, max_value=2100, value=datetime.now().year)
+    col1, col2 = st.columns(2)
+    with col1:
+        ano_input = st.number_input("Ano de referência", min_value=1900, max_value=2100, value=datetime.now().year)
+    with col2:
+        remover_zerados = st.checkbox("🧹 Remover linhas vazias (Oculta R$ 0,00)", value=True, help="Desmarque se você quiser salvar no Excel os comitês que não receberam investimento em determinados programas.")
 
     if programa_cols and comites_incluidos:
-        # A MÁGICA ACONTECE AQUI: Gera a tabela despivotada exatamente agora
-        df_linear_preview = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input)
+        df_linear_preview = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input, remover_zerados)
         
-        st.caption(f"Prévia da transformação ({df_linear_preview.shape[0]} linhas):")
-        # Visualização garantindo a formatação em duas casas decimais
-        st.dataframe(
-            df_linear_preview.head(15).style.format({"Valor": "{:,.2f}"}),
-            use_container_width=True,
-        )
+        st.caption(f"Prévia da transformação ({df_linear_preview.shape[0]} linhas encontradas):")
+        if df_linear_preview.empty and remover_zerados:
+            st.warning("Todas as linhas retornaram R$ 0,00. Isso indica que a 'Linha de Cabeçalho' no Passo 3 foi escolhida errada e os valores se perderam. Volte no Passo 3 e mude o número da linha.")
+        else:
+            st.dataframe(
+                df_linear_preview.head(30).style.format({"Valor": "{:,.2f}"}),
+                use_container_width=True,
+            )
     else:
         st.info("Selecione ao menos um Programa e um Comitê para ver a prévia.")
 
     if st.button("✅ Transformar e salvar", type="primary", disabled=not (programa_cols and comites_incluidos)):
         try:
-            df_para_salvar = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input)
+            df_para_salvar = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input, remover_zerados)
             
             conn = get_connection()
             exercicio_id = get_ou_criar_exercicio(conn, ano_input)
@@ -492,7 +495,6 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
         finally:
             if 'conn' in locals(): conn.close()
 
-        # Guarda o DataFrame já despivotado no estado da sessão (livre de bugs posteriores)
         df_para_salvar["_arquivo_origem"] = uploaded_file.name
         df_para_salvar["_pagina_origem"] = pagina_num
         st.session_state.consolidado.append({
@@ -526,7 +528,7 @@ else:
                     label_visibility="collapsed"
                 )
                 if novo_ano != ano_atual:
-                    item["df"]["Ano"] = novo_ano # Altera diretamente no dataframe consolidado
+                    item["df"]["Ano"] = novo_ano 
         with c3:
             if st.button("Remover", key=f"remove_{i}"):
                 st.session_state.consolidado.pop(i)
