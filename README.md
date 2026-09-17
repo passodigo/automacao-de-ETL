@@ -1,62 +1,84 @@
-# PDF → Excel ETL
+# Automação de ETL: PDF para Excel 
 
-App em Python (Streamlit) para extrair tabelas de documentos PDF — que mudam de layout ano a ano — e consolidar em uma planilha Excel. Em vez de depender 100% de detecção automática, o app deixa o usuário final conferir visualmente e escolher exatamente qual página, tabela e cabeçalho extrair.
+Uma aplicação web interativa construída com **Streamlit** para extração avançada de tabelas em arquivos PDF. Utiliza a inteligência artificial do **Docling (TableFormer)** para ler tabelas complexas (com células mescladas ou sem bordas) e convertê-las em conjuntos de dados estruturados e limpos.
 
-## Funcionalidades
+O sistema possui dois fluxos de trabalho principais: um extrator genérico para qualquer tipo de tabela e um transformador específico para dados orçamentários (Matriz de Comitês x Programas), que realiza a despivotagem (unpivot) automática e salva os resultados em um banco de dados SQLite.
 
-- Upload de PDF com preview de cada página (imagem renderizada)
-- Detecção automática de tabelas, com destaque visual (retângulo vermelho) sobre a tabela encontrada
-- 3 estratégias de detecção configuráveis (por linhas/bordas, por texto, híbrida) — com fallback automático quando a estratégia atual não encontra nada
-- Exclusão de tabelas detectadas antes de escolher qual extrair
-- Seleção manual de qual linha é o cabeçalho real (resolve tabelas com cabeçalho mesclado em duas linhas)
-- Edição manual dos nomes de coluna, para corrigir qualquer desalinhamento da extração automática
-- Renomeação de colunas com memória entre uploads (sugere o mesmo de-para usado antes)
-- **Modo especializado "Comitês x Programas"**: despivota automaticamente tabelas em formato matriz (Comitê nas linhas, Programa nas colunas) para formato linear `Comitê | Programa | Ano | Valor`, com exclusão de linhas de total/rodapé e campo Ano editável (que recalcula todas as linhas do lote automaticamente)
-- Consolidação de múltiplas tabelas/PDFs na mesma sessão, com exportação para um único Excel (uma aba por tabela + uma aba consolidada)
+## 🚀 Principais Funcionalidades
 
-## Instalação
+* **Motor de Extração Inteligente (Docling):** Supera bibliotecas tradicionais ao reconhecer estruturas de tabelas invisíveis, cabeçalhos de múltiplas linhas e células mescladas sem perder o alinhamento.
+* **Recorte Manual de Resgate:** Se a IA não detectar uma tabela em uma página complexa, o usuário pode desenhar um retângulo vermelho na tela. O sistema reprocessa cirurgicamente a área recortada, garantindo 100% de captura.
+* **Modo 1: ETL Genérico:** 
+  * Permite a seleção manual da "linha de cabeçalho" correta.
+  * Renomeação customizada de colunas.
+  * Consolidação de múltiplas tabelas (de páginas ou arquivos diferentes) em um único Excel final.
+* **Modo 2: Despivotagem (Comitês x Programas):**
+  * Converte matrizes cruzadas em formato tabular relacional (`Comitê | Programa | Ano | Valor`).
+  * Tratamento automatizado de valores financeiros em BRL (limpa traços, pontos, formatações contábeis e textos nulos).
+  * Filtro inteligente que remove linhas vazias (`R$ 0,00`) para não poluir o arquivo final.
+  * Integração direta com Banco de Dados SQLite.
 
-Requer Python 3.10+.
+## 🛠️ Tecnologias Utilizadas
+
+* **[Streamlit](https://streamlit.io/):** Interface gráfica e gerenciamento de estado.
+* **[Docling](https://github.com/DS4SD/docling):** Extração de dados e conversão de documentos baseada em IA.
+* **[Pandas](https://pandas.pydata.org/):** Manipulação, limpeza e despivotagem (`pd.melt`) dos dados.
+* **[PdfPlumber](https://github.com/jsvine/pdfplumber) / PyPDF:** Manipulação de caixas de PDF e renderização de prévias visuais.
+* **SQLite3:** Armazenamento persistente estruturado.
+
+## ⚙️ Pré-requisitos e Instalação
+
+Certifique-se de ter o Python 3.9+ instalado. Para instalar todas as dependências necessárias, abra o terminal e execute o comando abaixo:
 
 ```bash
-git clone <url-deste-repositorio>
-cd <pasta-do-repositorio>
-pip install -r requirements.txt
-```
+pip install streamlit docling pdfplumber pypdf streamlit-cropper pandas openpyxl Pillow
 
-## Como usar
 
-```bash
+
+Nota: A primeira execução do Docling fará o download automático dos modelos de IA (Layout e TableStructure). Isso pode levar alguns segundos, mas os arquivos ficarão salvos em cache para as próximas execuções.
+
+🏃 Como Executar
+
+Para iniciar a aplicação, navegue até a pasta do projeto no seu terminal e execute:
+Bash
+
 streamlit run app.py
-```
 
-Isso abre automaticamente `http://localhost:8501` no navegador.
+O seu navegador padrão abrirá automaticamente na porta local da aplicação (geralmente http://localhost:8501).
+📖 Guia de Uso
+Passo 1: Seleção do Modo e Upload
 
-**Fluxo:**
+Na barra lateral esquerda, escolha se deseja fazer um ETL Genérico ou extrair a Matriz Orçamentária (Comitês x Programas). Em seguida, faça o upload do arquivo .pdf.
+Passo 2: Navegação e Otimização
 
-1. Escolha o modo na barra lateral: **ETL Genérico** ou **Comitês x Programas**
-2. Faça upload do PDF
-3. Navegue até a página com a tabela desejada
-4. Se nenhuma tabela for detectada, troque a **estratégia de detecção** (barra lateral) — tabelas sem bordas desenhadas costumam precisar da estratégia "Baseada em texto"
-5. Marque/desmarque quais tabelas detectadas você quer considerar
-6. Confira a prévia bruta e informe qual linha é o cabeçalho real (importante em tabelas com cabeçalho mesclado em duas linhas)
-7. Ajuste os nomes de coluna se necessário
-8. **Modo Genérico:** renomeie colunas à vontade e clique em "Adicionar ao conjunto final"
-   **Modo Comitês x Programas:** selecione a coluna de Comitê, quais colunas são Programas, quais linhas incluir, informe o Ano, e clique em "Transformar e adicionar"
-9. Repita para outras páginas/PDFs quantas vezes precisar
-10. Baixe o Excel consolidado na seção "Conjunto final"
+    Selecione a página desejada. O sistema processa o PDF página por página sob demanda (Lazy Loading) para economizar memória.
 
-## Limitações conhecidas
+    Dicas de Performance:
 
-- A detecção de tabelas depende da estrutura do PDF. PDFs escaneados (imagem, sem texto selecionável) não são suportados sem OCR — seria necessário adicionar `pytesseract` para esse caso.
-- Tabelas com células mescladas de forma complexa podem exigir ajuste manual do cabeçalho e/ou dos nomes de coluna.
-- O app roda localmente na máquina de quem usa; para acesso remoto por várias pessoas, seria necessário publicar (ex: Streamlit Community Cloud ou servidor interno).
+        Mantenha o modo "Rápido" ativado por padrão.
 
-## Estrutura do projeto
+        Deixe o OCR desligado para relatórios digitais nativos (gerados por Word/Excel). Ative o OCR apenas se o PDF for uma imagem/documento escaneado.
 
-```
-.
-├── app.py              # App principal (Streamlit)
-├── requirements.txt     # Dependências Python
-└── README.md
-```
+Passo 3: Extração e Tratamento
+
+    Selecione a tabela identificada pelo sistema na lista de opções.
+
+    Aponte qual linha representa os nomes reais das colunas (índice 0, 1, 2...).
+
+    Se a tabela não for encontrada, abra o menu suspensivo de Reforço Manual, desenhe um retângulo em volta da tabela na imagem de referência visual e clique em reprocessar.
+
+Passo 4: Transformação (Modo Comitês)
+
+    Selecione qual coluna atua como eixo Y (Comitês) e quais colunas atuam como eixo X (Programas).
+
+    Selecione o ano de referência.
+
+    Verifique a prévia financeira gerada. Se os dados estiverem corretos, clique em Transformar e salvar. Os dados irão para a memória da aplicação e serão registrados no banco local SQLite.
+
+Passo 5: Exportação
+
+    Revise os lotes processados no painel inferior.
+
+    Ajuste o ano de um lote inteiro se necessário.
+
+    Clique em Baixar Excel Consolidado para gerar o arquivo .xlsx limpo e formatado.

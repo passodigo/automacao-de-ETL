@@ -11,6 +11,20 @@ Dois modos, na barra lateral:
      formato "matriz" (Comitê nas linhas, Programa nas colunas). Gera
      formato linear: Comitê | Programa | Ano | Valor. E salva no SQLite!
 
+PERFORMANCE (leia se o app estiver lento/travando)
+----------------------------------------------------
+- CONVERSÃO POR PÁGINA: o Docling só processa a página que você está vendo,
+  não o PDF inteiro. Isso é cacheado por (arquivo, página, modo, ocr), então
+  voltar numa página já vista é instantâneo.
+- OCR DESLIGADO POR PADRÃO: a maioria dos PDFs de relatório/orçamento tem
+  camada de texto real (não são escaneados), então rodar OCR neles é
+  desperdício de CPU/RAM. Religue na sidebar só se o seu PDF for escaneado
+  (imagem pura, sem texto selecionável).
+- MODO RÁPIDO POR PADRÃO: TableFormerMode.FAST é usado por padrão em toda
+  navegação. Se uma tabela específica sair errada, troque pra "Preciso"
+  (ACCURATE) só naquela página, ou use o recorte manual — ele sempre roda
+  em modo preciso, mas como a área é pequena, o custo é baixo.
+
 COMO RODAR
 ----------
     pip install streamlit docling pdfplumber pypdf streamlit-cropper pandas openpyxl Pillow
@@ -43,11 +57,12 @@ if "consolidado" not in st.session_state:
 if "coluna_aliases" not in st.session_state:
     st.session_state.coluna_aliases = {}
 
-if "docling_doc" not in st.session_state:
-    st.session_state.docling_doc = None
+if "docling_paginas" not in st.session_state:
+    # {(file_id, pagina_num, modo, ocr): documento_docling_de_1_pagina}
+    st.session_state.docling_paginas = {}
 
-if "docling_file_id" not in st.session_state:
-    st.session_state.docling_file_id = None
+if "tabelas_extra_por_pagina" not in st.session_state:
+    st.session_state.tabelas_extra_por_pagina = {}
 
 
 def normalize(s: str) -> str:
@@ -58,18 +73,18 @@ def parse_valor_brl(v):
     """Converte valores em texto para float, suportando vários padrões numéricos."""
     if pd.isna(v) or v is None:
         return 0.0
-    
+
     s = str(v).strip()
     if not s or s.lower() in ("-", "—", "–", "nan", "none", "null"):
         return 0.0
-    
+
     is_negative = s.startswith("-") or (s.startswith("(") and s.endswith(")"))
-    
+
     # Mantém apenas números, ponto e vírgula
     s = re.sub(r"[^\d,.]", "", s)
     if not s:
         return 0.0
-        
+
     # Padroniza formatos com ponto e vírgula
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
@@ -79,14 +94,14 @@ def parse_valor_brl(v):
     elif "," in s:
         partes = s.split(",")
         if len(partes) > 2 or (len(partes) == 2 and len(partes[1]) == 3):
-            s = s.replace(",", "") # Trata como milhar (US)
+            s = s.replace(",", "")  # Trata como milhar (US)
         else:
-            s = s.replace(",", ".") # Trata como decimal (BR)
+            s = s.replace(",", ".")  # Trata como decimal (BR)
     elif "." in s:
         partes = s.split(".")
         if len(partes) > 2 or (len(partes) == 2 and len(partes[1]) == 3):
-            s = s.replace(".", "") # Trata como milhar (BR)
-            
+            s = s.replace(".", "")  # Trata como milhar (BR)
+
     try:
         val = float(s)
         return -val if is_negative else val
@@ -100,26 +115,26 @@ def aplicar_despivotagem(raw_df, comite_col, programa_cols, comites_incluidos, a
     """
     df_filtrado = raw_df[raw_df[comite_col].astype(str).str.strip().isin(comites_incluidos)].copy()
     df_filtrado = df_filtrado[[comite_col] + programa_cols]
-    
+
     df_linear = df_filtrado.melt(
         id_vars=[comite_col],
         value_vars=programa_cols,
         var_name='Programa',
         value_name='Valor_Cru'
     )
-    
+
     df_linear['Comitê'] = df_linear[comite_col].astype(str).str.strip()
     df_linear['Programa'] = df_linear['Programa'].astype(str).str.strip()
     df_linear['Ano'] = ano
     df_linear['Valor'] = df_linear['Valor_Cru'].apply(parse_valor_brl)
-    
+
     # Ordena bonitinho para o Excel: Primeiro o Comitê, depois os programas dele
     df_linear = df_linear.sort_values(by=['Comitê', 'Programa']).reset_index(drop=True)
-    
+
     # Mágica que limpa o lixo visual e deixa só quem recebeu investimento
     if remover_zerados:
         df_linear = df_linear[df_linear['Valor'] != 0.0].reset_index(drop=True)
-        
+
     return df_linear[['Comitê', 'Programa', 'Ano', 'Valor']]
 
 
@@ -131,44 +146,68 @@ def get_ou_criar_comite(conn, nome_comite: str) -> int:
     cur = conn.cursor()
     cur.execute("SELECT id FROM comite WHERE nome = ?", (nome,))
     row = cur.fetchone()
-    if row: return row[0]
+    if row:
+        return row[0]
     cur.execute("INSERT INTO comite (nome) VALUES (?)", (nome,))
     return cur.lastrowid
+
 
 def get_ou_criar_programa(conn, codigo_programa: str) -> int:
     codigo = str(codigo_programa).strip().upper()
     cur = conn.cursor()
     cur.execute("SELECT id FROM programa WHERE codigo = ?", (codigo,))
     row = cur.fetchone()
-    if row: return row[0]
+    if row:
+        return row[0]
     cur.execute("INSERT INTO programa (codigo) VALUES (?)", (codigo,))
     return cur.lastrowid
+
 
 def get_ou_criar_exercicio(conn, ano: int) -> int:
     cur = conn.cursor()
     cur.execute("SELECT id FROM exercicio WHERE ano = ?", (ano,))
     row = cur.fetchone()
-    if row: return row[0]
+    if row:
+        return row[0]
     cur.execute("INSERT INTO exercicio (ano) VALUES (?)", (ano,))
     return cur.lastrowid
 
 
 # ==============================================================================
-# DOCLING: CONVERSÃO DO PDF E RECONSTRUÇÃO
+# DOCLING: CONVERSÃO POR PÁGINA (lazy) E RECONSTRUÇÃO DA TABELA COMO MATRIZ
 # ==============================================================================
 @st.cache_resource
-def get_docling_converter() -> DocumentConverter:
+def get_docling_converter(modo: str = "fast", ocr: bool = False) -> DocumentConverter:
+    """Cacheado por combinação (modo, ocr) — cada combinação carrega seus
+    próprios modelos uma vez só, e reaproveita entre chamadas."""
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_table_structure = True
-    pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+    pipeline_options.table_structure_options.mode = (
+        TableFormerMode.ACCURATE if modo == "accurate" else TableFormerMode.FAST
+    )
+    # OCR desligado por padrão: PDFs gerados digitalmente (a maioria dos
+    # relatórios/orçamentos) já têm texto real, então OCR só consome
+    # CPU/RAM à toa. Religue (parâmetro ocr=True) apenas para PDF escaneado.
+    pipeline_options.do_ocr = ocr
+
     return DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
 
-def converter_pdf_com_docling(pdf_bytes: bytes, nome_arquivo: str):
-    converter = get_docling_converter()
+
+def converter_pagina_com_docling(pdf_bytes: bytes, nome_arquivo: str, pagina_num: int, modo: str, ocr: bool):
+    """Converte SÓ a página pedida, em vez do PDF inteiro — é o que mais
+    reduz tempo e memória num PDF de muitas páginas."""
+    converter = get_docling_converter(modo, ocr)
     source = DocumentStream(name=nome_arquivo, stream=io.BytesIO(pdf_bytes))
-    return converter.convert(source).document
+    try:
+        resultado = converter.convert(source, page_range=(pagina_num, pagina_num))
+    except TypeError:
+        # Fallback para versões do Docling sem o parâmetro page_range:
+        # converte o documento inteiro (mais lento, mas continua funcionando).
+        resultado = converter.convert(source)
+    return resultado.document
+
 
 def cropar_pagina_pdf(pdf_bytes: bytes, pagina_num: int, bbox_pdf: tuple) -> bytes:
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -176,8 +215,8 @@ def cropar_pagina_pdf(pdf_bytes: bytes, pagina_num: int, bbox_pdf: tuple) -> byt
     page = reader.pages[pagina_num - 1]
 
     x0, y0, x1, y1 = bbox_pdf
-    MARGEM = 30.0 
-    
+    MARGEM = 30.0
+
     lim_x0 = float(page.mediabox.left)
     lim_y0 = float(page.mediabox.bottom)
     lim_x1 = float(page.mediabox.right)
@@ -198,6 +237,7 @@ def cropar_pagina_pdf(pdf_bytes: bytes, pagina_num: int, bbox_pdf: tuple) -> byt
     writer.write(buffer)
     return buffer.getvalue()
 
+
 def box_cropper_para_bbox_pdf(box: dict, resolucao_dpi: int, altura_pagina_pt: float) -> tuple:
     fator_escala = 72.0 / resolucao_dpi
     x0 = box["left"] * fator_escala
@@ -207,6 +247,7 @@ def box_cropper_para_bbox_pdf(box: dict, resolucao_dpi: int, altura_pagina_pt: f
     y0 = altura_pagina_pt - base_pt
     y1 = altura_pagina_pt - topo_pt
     return (x0, y0, x1, y1)
+
 
 def docling_table_para_matriz(table) -> list[list[str]]:
     data = table.data
@@ -221,11 +262,6 @@ def docling_table_para_matriz(table) -> list[list[str]]:
                     matriz[r][c] = texto
     return matriz
 
-def pagina_da_tabela(table) -> int:
-    if table.prov:
-        return table.prov[0].page_no
-    return 1
-
 
 # ==============================================================================
 # SIDEBAR E LEITURA DO PDF
@@ -238,6 +274,23 @@ modo = st.sidebar.radio(
 
 st.sidebar.header("1. Upload do PDF")
 uploaded_file = st.sidebar.file_uploader("Selecione um PDF", type=["pdf"])
+
+st.sidebar.header("⚙️ Desempenho do Docling")
+modo_precisao = st.sidebar.radio(
+    "Precisão da extração de tabelas",
+    ["Rápido (recomendado)", "Preciso (mais lento)"],
+    help="Comece no modo Rápido. Se alguma tabela da página sair errada, "
+         "troque pra Preciso só nessa página, ou use o recorte manual "
+         "(esse sempre roda em modo preciso, mas só na área recortada).",
+)
+modo_docling = "accurate" if modo_precisao.startswith("Preciso") else "fast"
+
+ocr_habilitado = st.sidebar.checkbox(
+    "Ativar OCR (só para PDF escaneado/imagem)",
+    value=False,
+    help="Deixe desmarcado para PDFs digitais (a grande maioria dos relatórios). "
+         "Rodar OCR sem necessidade é uma das principais causas de lentidão.",
+)
 
 st.title("📄 ETL de PDF para Excel")
 
@@ -253,13 +306,8 @@ if uploaded_file is None:
 pdf_bytes = uploaded_file.read()
 file_id = (uploaded_file.name, uploaded_file.size)
 
-if st.session_state.docling_file_id != file_id:
-    with st.spinner("Processando PDF com Docling (pode levar alguns segundos na primeira vez)..."):
-        st.session_state.docling_doc = converter_pdf_com_docling(pdf_bytes, uploaded_file.name)
-        st.session_state.docling_file_id = file_id
-
-docling_doc = st.session_state.docling_doc
-total_paginas = len(docling_doc.pages)
+# Número de páginas via pypdf (leve) — não precisa do Docling só pra isso.
+total_paginas = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
 
 st.sidebar.header("2. Escolha a página")
 pagina_num = st.sidebar.number_input(
@@ -267,8 +315,18 @@ pagina_num = st.sidebar.number_input(
 )
 
 RESOLUCAO_PREVIEW_DPI = 150
-if "tabelas_extra_por_pagina" not in st.session_state:
-    st.session_state.tabelas_extra_por_pagina = {}
+
+# Conversão do Docling É POR PÁGINA e fica em cache por (arquivo, página,
+# modo, ocr) — trocar de página só reprocessa se ainda não tiver sido vista
+# com essa combinação de configurações.
+chave_pagina = (file_id, pagina_num, modo_docling, ocr_habilitado)
+if chave_pagina not in st.session_state.docling_paginas:
+    with st.spinner(f"Processando página {pagina_num} com Docling..."):
+        st.session_state.docling_paginas[chave_pagina] = converter_pagina_com_docling(
+            pdf_bytes, uploaded_file.name, pagina_num, modo_docling, ocr_habilitado
+        )
+
+docling_doc_pagina = st.session_state.docling_paginas[chave_pagina]
 
 col_preview, col_selecao = st.columns([1.3, 1])
 
@@ -281,9 +339,9 @@ with col_preview:
         pil_image = im.original
         st.image(pil_image, use_container_width=True, caption="Referência visual da página")
 
-tabelas_docling = [
-    docling_table_para_matriz(t) for t in docling_doc.tables if pagina_da_tabela(t) == pagina_num
-]
+# Como a conversão já é de 1 página só, todas as tabelas do documento
+# retornado pertencem a essa página — não precisa mais filtrar por page_no.
+tabelas_docling = [docling_table_para_matriz(t) for t in docling_doc_pagina.tables]
 
 chave_extra = (file_id, pagina_num)
 tabelas_extra = st.session_state.tabelas_extra_por_pagina.get(chave_extra, [])
@@ -364,6 +422,10 @@ with col_selecao:
             st.dataframe(df_selecionado.head(6), use_container_width=True)
 
 with st.expander("🔍 O Docling não achou todas as tabelas desta página? Recorte manualmente"):
+    st.caption(
+        "O recorte sempre roda em modo Preciso (ACCURATE), mas como a área é pequena "
+        "o custo é baixo — não afeta o desempenho da navegação normal."
+    )
     box = st_cropper(
         pil_image, realtime_update=True, box_color="#FF0000",
         aspect_ratio=None, return_type="box", key=f"cropper_{pagina_num}"
@@ -375,7 +437,7 @@ with st.expander("🔍 O Docling não achou todas as tabelas desta página? Reco
             bbox_pdf = box_cropper_para_bbox_pdf(box, RESOLUCAO_PREVIEW_DPI, altura_pagina_pt)
             pdf_recortado = cropar_pagina_pdf(pdf_bytes, pagina_num, bbox_pdf)
             with st.spinner("Reprocessando recorte com Docling..."):
-                converter = get_docling_converter()
+                converter = get_docling_converter("accurate", ocr_habilitado)
                 source_recorte = DocumentStream(name=f"crop_p{pagina_num}", stream=io.BytesIO(pdf_recortado))
                 doc_recortado = converter.convert(source_recorte).document
 
@@ -384,7 +446,7 @@ with st.expander("🔍 O Docling não achou todas as tabelas desta página? Reco
             else:
                 novas_matrizes = [docling_table_para_matriz(t) for t in doc_recortado.tables]
                 st.session_state.tabelas_extra_por_pagina.setdefault(chave_extra, []).extend(novas_matrizes)
-                st.success(f"Tabela encontrada e adicionada!")
+                st.success("Tabela encontrada e adicionada!")
                 st.rerun()
 
     if tabelas_extra:
@@ -461,7 +523,7 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
 
     if programa_cols and comites_incluidos:
         df_linear_preview = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input, remover_zerados)
-        
+
         st.caption(f"Prévia da transformação ({df_linear_preview.shape[0]} linhas encontradas):")
         if df_linear_preview.empty and remover_zerados:
             st.warning("Todas as linhas retornaram R$ 0,00. Isso indica que a 'Linha de Cabeçalho' no Passo 3 foi escolhida errada e os valores se perderam. Volte no Passo 3 e mude o número da linha.")
@@ -476,7 +538,7 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
     if st.button("✅ Transformar e salvar", type="primary", disabled=not (programa_cols and comites_incluidos)):
         try:
             df_para_salvar = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input, remover_zerados)
-            
+
             conn = get_connection()
             exercicio_id = get_ou_criar_exercicio(conn, ano_input)
             cur = conn.cursor()
@@ -493,7 +555,8 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
         except Exception as e:
             st.error(f"Erro ao salvar no banco: {e}")
         finally:
-            if 'conn' in locals(): conn.close()
+            if 'conn' in locals():
+                conn.close()
 
         df_para_salvar["_arquivo_origem"] = uploaded_file.name
         df_para_salvar["_pagina_origem"] = pagina_num
@@ -528,7 +591,7 @@ else:
                     label_visibility="collapsed"
                 )
                 if novo_ano != ano_atual:
-                    item["df"]["Ano"] = novo_ano 
+                    item["df"]["Ano"] = novo_ano
         with c3:
             if st.button("Remover", key=f"remove_{i}"):
                 st.session_state.consolidado.pop(i)
