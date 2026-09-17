@@ -32,7 +32,7 @@ Certifique-se de ter o Python 3.9+ instalado. Para instalar todas as dependênci
 
 ```bash
 pip install streamlit docling pdfplumber pypdf streamlit-cropper pandas openpyxl Pillow
-
+```
 
 
 Nota: A primeira execução do Docling fará o download automático dos modelos de IA (Layout e TableStructure). Isso pode levar alguns segundos, mas os arquivos ficarão salvos em cache para as próximas execuções.
@@ -40,15 +40,15 @@ Nota: A primeira execução do Docling fará o download automático dos modelos 
 🏃 Como Executar
 
 Para iniciar a aplicação, navegue até a pasta do projeto no seu terminal e execute:
-Bash
-
+```bash
 streamlit run app.py
-
+```
 O seu navegador padrão abrirá automaticamente na porta local da aplicação (geralmente http://localhost:8501).
 📖 Guia de Uso
 Passo 1: Seleção do Modo e Upload
-
+```
 Na barra lateral esquerda, escolha se deseja fazer um ETL Genérico ou extrair a Matriz Orçamentária (Comitês x Programas). Em seguida, faça o upload do arquivo .pdf.
+```
 Passo 2: Navegação e Otimização
 
     Selecione a página desejada. O sistema processa o PDF página por página sob demanda (Lazy Loading) para economizar memória.
