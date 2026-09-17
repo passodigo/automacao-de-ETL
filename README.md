@@ -44,6 +44,7 @@ Para iniciar a aplicação, navegue até a pasta do projeto no seu terminal e ex
 streamlit run app.py
 ```
 O seu navegador padrão abrirá automaticamente na porta local da aplicação (geralmente http://localhost:8501).
+
 📖 Guia de Uso
 Passo 1: Seleção do Modo e Upload
 ```
