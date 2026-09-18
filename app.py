@@ -46,7 +46,307 @@ from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
 
 inicializar_banco()  # garante que o banco e as tabelas existem
-st.set_page_config(page_title="PDF -> Excel", layout="wide")
+st.set_page_config(page_title="ETL PDF → Excel", page_icon="📄", layout="wide")
+
+if "tema_escuro" not in st.session_state:
+    st.session_state.tema_escuro = False
+
+with st.sidebar:
+    col_tema_label, col_tema_botao = st.columns([3, 1])
+    with col_tema_label:
+        st.caption("Tema da interface")
+    with col_tema_botao:
+        icone_tema = "☀️" if st.session_state.tema_escuro else "🌙"
+        if st.button(icone_tema, key="botao_tema", help="Alternar entre tema claro e escuro"):
+            st.session_state.tema_escuro = not st.session_state.tema_escuro
+            st.rerun()
+
+if st.session_state.tema_escuro:
+    CORES = {
+        "bg_app": "#0B1210",
+        "bg_sidebar": "#0F1815",
+        "bg_card": "#141F1C",
+        "border": "#233330",
+        "text": "#E2E8E6",
+        "text_muted": "#94A3A8",
+        "primary": "#22A88D",
+        "primary_hover": "#1B8A73",
+        "hero_gradient": "linear-gradient(135deg, #0B3B32 0%, #071F1A 100%)",
+    }
+else:
+    CORES = {
+        "bg_app": "#FFFFFF",
+        "bg_sidebar": "#F8FAF9",
+        "bg_card": "#FFFFFF",
+        "border": "#E2E8E6",
+        "text": "#1E293B",
+        "text_muted": "#64748B",
+        "primary": "#0F6B5C",
+        "primary_hover": "#134E4A",
+        "hero_gradient": "linear-gradient(135deg, #0F6B5C 0%, #134E4A 100%)",
+    }
+
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"]  {{
+        font-family: 'Inter', sans-serif;
+    }}
+
+    /* Fundo geral da aplicação e cor de texto padrão */
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
+        background-color: {CORES['bg_app']};
+        color: {CORES['text']};
+    }}
+    [data-testid="stHeader"] {{ background: transparent; }}
+    .stApp, .stApp p, .stApp span, .stApp label, .stApp div {{
+        color: {CORES['text']};
+    }}
+    .stCaption, small {{ color: {CORES['text_muted']} !important; }}
+
+    /* Cabeçalho principal */
+    .app-hero {{
+        background: {CORES['hero_gradient']};
+        padding: 1.6rem 2rem;
+        border-radius: 14px;
+        margin-bottom: 1.4rem;
+        color: white;
+        box-shadow: 0 4px 14px rgba(15, 107, 92, 0.25);
+    }}
+    .app-hero h1 {{
+        margin: 0;
+        font-size: 1.55rem;
+        font-weight: 700;
+        color: white !important;
+    }}
+    .app-hero p {{
+        margin: 0.3rem 0 0 0;
+        opacity: 0.88;
+        font-size: 0.95rem;
+        color: white !important;
+    }}
+
+    /* Badges numeradas de etapa (substituem st.subheader nas seções) */
+    .step-badge {{
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin: 1.3rem 0 0.7rem 0;
+    }}
+    .step-badge .num {{
+        background: {CORES['primary']};
+        color: white;
+        width: 26px;
+        height: 26px;
+        min-width: 26px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.82rem;
+    }}
+    .step-badge .title {{
+        font-weight: 600;
+        font-size: 1.05rem;
+        color: {CORES['primary']};
+    }}
+    .step-badge.big .num {{ width: 32px; height: 32px; min-width: 32px; font-size: 0.95rem; }}
+    .step-badge.big .title {{ font-size: 1.25rem; }}
+
+    /* Cards (containers com borda) */
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        border-radius: 12px !important;
+        background-color: {CORES['bg_card']} !important;
+        border-color: {CORES['border']} !important;
+    }}
+
+    /* Botões */
+    div.stButton > button, div.stDownloadButton > button {{
+        border-radius: 8px;
+        font-weight: 600;
+        background-color: {CORES['bg_card']};
+        color: {CORES['text']};
+        border: 1px solid {CORES['border']};
+    }}
+    div.stButton > button[kind="primary"], div.stDownloadButton > button[kind="primary"] {{
+        background-color: {CORES['primary']};
+        border-color: {CORES['primary']};
+        color: white;
+    }}
+    div.stButton > button[kind="primary"]:hover, div.stDownloadButton > button[kind="primary"]:hover {{
+        background-color: {CORES['primary_hover']};
+        border-color: {CORES['primary_hover']};
+    }}
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        background-color: {CORES['bg_sidebar']};
+        border-right: 1px solid {CORES['border']};
+    }}
+    section[data-testid="stSidebar"] * {{ color: {CORES['text']}; }}
+    section[data-testid="stSidebar"] h2 {{
+        font-size: 0.95rem;
+        color: {CORES['primary']} !important;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }}
+
+    /* Campos de entrada (texto, número, select, multiselect) */
+    .stTextInput input, .stNumberInput input,
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stMultiSelect div[data-baseweb="select"] > div,
+    textarea {{
+        background-color: {CORES['bg_card']} !important;
+        color: {CORES['text']} !important;
+        border-color: {CORES['border']} !important;
+    }}
+
+    /* Wrapper interno (BaseWeb) dos inputs/selects — é a "caixa" visível
+       de fato; sem isso o fundo da caixa e o texto dentro ficam de temas
+       diferentes */
+    div[data-baseweb="base-input"],
+    div[data-baseweb="input"],
+    div[data-baseweb="textarea"] {{
+        background-color: {CORES['bg_card']} !important;
+        border-color: {CORES['border']} !important;
+    }}
+    div[data-baseweb="base-input"] input,
+    div[data-baseweb="input"] input,
+    div[data-baseweb="textarea"] textarea {{
+        background-color: transparent !important;
+        color: {CORES['text']} !important;
+        -webkit-text-fill-color: {CORES['text']} !important;
+    }}
+    input::placeholder, textarea::placeholder {{
+        color: {CORES['text_muted']} !important;
+        opacity: 1 !important;
+    }}
+
+    /* Tags dos multiselects (ex.: "Tabela 1 — 7 linhas x 5 colunas") */
+    div[data-baseweb="tag"] {{
+        background-color: {CORES['primary']} !important;
+    }}
+    div[data-baseweb="tag"] span, div[data-baseweb="tag"] svg {{
+        color: white !important;
+        fill: white !important;
+    }}
+
+    /* Ícones dos dropdowns (setinha, lupa etc.) */
+    div[data-baseweb="select"] svg {{
+        fill: {CORES['text']} !important;
+    }}
+
+    /* Menu suspenso do select/multiselect (a lista de opções) */
+    ul[data-testid="stSelectboxVirtualDropdown"], div[data-baseweb="popover"] {{
+        background-color: {CORES['bg_card']} !important;
+    }}
+    li[data-baseweb="menu-item"] {{
+        color: {CORES['text']} !important;
+        background-color: {CORES['bg_card']} !important;
+    }}
+    li[data-baseweb="menu-item"]:hover {{
+        background-color: {CORES['border']} !important;
+    }}
+
+    /* Rótulos de radio/checkbox e o círculo/caixa de marcação */
+    .stRadio label, .stCheckbox label, .stRadio p, .stCheckbox p {{
+        color: {CORES['text']} !important;
+    }}
+    [data-baseweb="radio"] div:first-child, [data-baseweb="checkbox"] div:first-child {{
+        border-color: {CORES['text_muted']} !important;
+    }}
+
+    /* Barra superior (menu ☰, botão Deploy) */
+    [data-testid="stToolbar"], [data-testid="stDecoration"] {{
+        background-color: {CORES['bg_app']} !important;
+    }}
+    [data-testid="stToolbarActions"] button, [data-testid="baseButton-header"] {{
+        background-color: {CORES['bg_card']} !important;
+        color: {CORES['text']} !important;
+        border: 1px solid {CORES['border']} !important;
+    }}
+
+    /* Caixas de alerta (st.info / st.warning / st.success / st.error) */
+    div[data-testid="stAlert"] {{
+        background-color: {CORES['bg_card']} !important;
+        color: {CORES['text']} !important;
+        border: 1px solid {CORES['border']} !important;
+    }}
+    div[data-testid="stAlert"] p {{
+        color: {CORES['text']} !important;
+    }}
+
+    /* Tabelas/dataframes com cantos arredondados */
+    div[data-testid="stDataFrame"] {{
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid {CORES['border']};
+    }}
+
+    /* Cartão do arquivo carregado + área de arrastar-soltar do uploader */
+    [data-testid="stFileUploaderFile"], [data-testid="stFileUploaderDropzone"] {{
+        background-color: {CORES['bg_card']} !important;
+        border: 1px solid {CORES['border']} !important;
+    }}
+    [data-testid="stFileUploaderFile"] *, [data-testid="stFileUploaderDropzone"] * {{
+        color: {CORES['text']} !important;
+    }}
+    [data-testid="stFileUploaderFile"] svg, [data-testid="stFileUploaderDropzone"] svg {{
+        fill: {CORES['text']} !important;
+    }}
+    [data-testid="stFileUploaderFile"] small, [data-testid="stFileUploaderDropzone"] small {{
+        color: {CORES['text_muted']} !important;
+    }}
+    [data-testid="stFileUploaderFileName"] {{
+        color: {CORES['text']} !important;
+    }}
+    [data-testid="stBaseButton-minimal"], button[title="Remove file"] {{
+        background-color: transparent !important;
+    }}
+    [data-testid="stBaseButton-minimal"] svg, button[title="Remove file"] svg {{
+        fill: {CORES['text']} !important;
+    }}
+
+    /* Botões +/- do number_input */
+    [data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {{
+        background-color: {CORES['bg_card']} !important;
+        border-color: {CORES['border']} !important;
+    }}
+    [data-testid="stNumberInputStepDown"] svg, [data-testid="stNumberInputStepUp"] svg {{
+        fill: {CORES['text']} !important;
+    }}
+
+    /* Checkbox (quadradinho de marcação) */
+    [data-baseweb="checkbox"] span {{
+        background-color: {CORES['bg_card']} !important;
+        border-color: {CORES['text_muted']} !important;
+    }}
+    [data-baseweb="checkbox"] svg {{
+        fill: white !important;
+    }}
+
+    /* Expander com aparência de card */
+    div[data-testid="stExpander"] {{
+        border-radius: 10px;
+        border: 1px solid {CORES['border']};
+        background-color: {CORES['bg_card']};
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def step_header(numero: str, titulo: str, big: bool = False):
+    """Cabeçalho de etapa estilizado (badge numerada), no lugar de st.subheader/st.header."""
+    classe = "step-badge big" if big else "step-badge"
+    st.markdown(
+        f'<div class="{classe}"><div class="num">{numero}</div><div class="title">{titulo}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 # ==============================================================================
 # ESTADO DA SESSÃO
@@ -266,13 +566,13 @@ def docling_table_para_matriz(table) -> list[list[str]]:
 # ==============================================================================
 # SIDEBAR E LEITURA DO PDF
 # ==============================================================================
-st.sidebar.header("Modo de extração")
+st.sidebar.header("🧭 Modo de extração")
 modo = st.sidebar.radio(
     "Escolha o tipo de tabela que você vai extrair:",
     ["ETL Genérico (qualquer tabela)", "Comitês x Programas (despivotar)"],
 )
 
-st.sidebar.header("1. Upload do PDF")
+st.sidebar.header("📤 1. Upload do PDF")
 uploaded_file = st.sidebar.file_uploader("Selecione um PDF", type=["pdf"])
 
 st.sidebar.header("⚙️ Desempenho do Docling")
@@ -292,12 +592,20 @@ ocr_habilitado = st.sidebar.checkbox(
          "Rodar OCR sem necessidade é uma das principais causas de lentidão.",
 )
 
-st.title("📄 ETL de PDF para Excel")
+st.markdown(
+    """
+    <div class="app-hero">
+        <h1>📄 ETL de PDF para Excel</h1>
+        <p>Extraia tabelas de relatórios em PDF com Docling, ajuste e envie para planilhas ou para o banco de dados.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if uploaded_file is None:
     st.info("Envie um PDF na barra lateral para começar.")
     if st.session_state.consolidado:
-        st.subheader("Tabelas já adicionadas nesta sessão")
+        step_header("✓", "Tabelas já adicionadas nesta sessão")
         for i, item in enumerate(st.session_state.consolidado):
             df_preview = item["df"]
             st.write(f"**{i+1}. {item['origem']}** — {df_preview.shape[0]} linhas x {df_preview.shape[1]} colunas")
@@ -309,7 +617,7 @@ file_id = (uploaded_file.name, uploaded_file.size)
 # Número de páginas via pypdf (leve) — não precisa do Docling só pra isso.
 total_paginas = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
 
-st.sidebar.header("2. Escolha a página")
+st.sidebar.header("📑 2. Escolha a página")
 pagina_num = st.sidebar.number_input(
     f"Página (1 a {total_paginas})", min_value=1, max_value=total_paginas, value=1
 )
@@ -331,7 +639,7 @@ docling_doc_pagina = st.session_state.docling_paginas[chave_pagina]
 col_preview, col_selecao = st.columns([1.3, 1])
 
 with col_preview:
-    st.subheader(f"Página {pagina_num} de {total_paginas}")
+    st.subheader(f"🖼️ Página {pagina_num} de {total_paginas}")
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf_preview:
         page_preview = pdf_preview.pages[pagina_num - 1]
         altura_pagina_pt = page_preview.height
@@ -347,7 +655,7 @@ chave_extra = (file_id, pagina_num)
 tabelas_extra = st.session_state.tabelas_extra_por_pagina.get(chave_extra, [])
 
 with col_selecao:
-    st.subheader("3. Selecione a tabela")
+    step_header("3", "Selecione a tabela")
 
     raw_tables = tabelas_docling + tabelas_extra
     origem_tabelas = (["docling"] * len(tabelas_docling)) + (["reforço manual"] * len(tabelas_extra))
@@ -459,7 +767,7 @@ with st.expander("🔍 O Docling não achou todas as tabelas desta página? Reco
 # ==============================================================================
 if modo.startswith("ETL Genérico") and df_selecionado is not None:
     st.divider()
-    st.subheader("4. Ajuste e Adição")
+    step_header("4", "Ajuste e Adição")
 
     novos_nomes = {}
     cols_widget = st.columns(min(len(df_selecionado.columns), 4) or 1)
@@ -490,7 +798,7 @@ if modo.startswith("ETL Genérico") and df_selecionado is not None:
 # ==============================================================================
 elif modo.startswith("Comitês") and df_selecionado is not None:
     st.divider()
-    st.subheader("4. Configure a despivotagem")
+    step_header("4", "Configure a despivotagem")
 
     colunas_disponiveis = list(df_selecionado.columns)
     comite_col = st.selectbox("Qual coluna é o Comitê?", colunas_disponiveis, index=0)
@@ -535,7 +843,7 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
     else:
         st.info("Selecione ao menos um Programa e um Comitê para ver a prévia.")
 
-    if st.button("✅ Transformar e salvar", type="primary", disabled=not (programa_cols and comites_incluidos)):
+    if st.button("✅ Transformar e salvar", type="primary", key="btn_transformar_salvar", disabled=not (programa_cols and comites_incluidos)):
         try:
             df_para_salvar = aplicar_despivotagem(df_selecionado, comite_col, programa_cols, comites_incluidos, ano_input, remover_zerados)
 
@@ -573,33 +881,53 @@ elif modo.startswith("Comitês") and df_selecionado is not None:
 # CONJUNTO FINAL / EXPORTAÇÃO
 # ==============================================================================
 st.divider()
-st.header("5. Conjunto final")
+step_header("5", "Conjunto final", big=True)
 
 if not st.session_state.consolidado:
     st.info("Nenhuma tabela adicionada ainda.")
 else:
+    total_linhas = sum(item["df"].shape[0] for item in st.session_state.consolidado)
+    total_tabelas = len(st.session_state.consolidado)
+    total_comites = 0
+    if any(item["tipo"] == "comite_programa" for item in st.session_state.consolidado):
+        try:
+            total_comites = pd.concat(
+                [item["df"]["Comitê"] for item in st.session_state.consolidado if item["tipo"] == "comite_programa"]
+            ).nunique()
+        except Exception:
+            total_comites = 0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📦 Tabelas no conjunto", total_tabelas)
+    m2.metric("🧾 Linhas totais", f"{total_linhas:,}".replace(",", "."))
+    if total_comites:
+        m3.metric("🏛️ Comitês distintos", total_comites)
+
+    st.write("")
+
     for i, item in enumerate(st.session_state.consolidado):
-        c1, c2, c3 = st.columns([4, 1.3, 1])
-        with c1:
-            st.write(f"**{i + 1}. {item['origem']}**")
-        with c2:
-            if item["tipo"] == "comite_programa":
-                ano_atual = int(item["df"]["Ano"].iloc[0]) if not item["df"].empty else 2026
-                novo_ano = st.number_input(
-                    "Ano do lote", min_value=1900, max_value=2100,
-                    value=ano_atual, step=1, key=f"ano_lote_{i}",
-                    label_visibility="collapsed"
-                )
-                if novo_ano != ano_atual:
-                    item["df"]["Ano"] = novo_ano
-        with c3:
-            if st.button("Remover", key=f"remove_{i}"):
-                st.session_state.consolidado.pop(i)
-                st.rerun()
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([4, 1.3, 1])
+            with c1:
+                st.write(f"**{i + 1}. {item['origem']}**")
+            with c2:
+                if item["tipo"] == "comite_programa":
+                    ano_atual = int(item["df"]["Ano"].iloc[0]) if not item["df"].empty else 2026
+                    novo_ano = st.number_input(
+                        "Ano do lote", min_value=1900, max_value=2100,
+                        value=ano_atual, step=1, key=f"ano_lote_{i}",
+                        label_visibility="collapsed"
+                    )
+                    if novo_ano != ano_atual:
+                        item["df"]["Ano"] = novo_ano
+            with c3:
+                if st.button("🗑️ Remover", key=f"remove_{i}"):
+                    st.session_state.consolidado.pop(i)
+                    st.rerun()
 
-        st.caption(f"{item['df'].shape[0]} linhas x {item['df'].shape[1]} colunas")
+            st.caption(f"📊 {item['df'].shape[0]} linhas x {item['df'].shape[1]} colunas")
 
-    with st.expander("Ver prévia consolidada"):
+    with st.expander("👁️ Ver prévia consolidada"):
         try:
             consolidado_df = pd.concat([item["df"] for item in st.session_state.consolidado], ignore_index=True)
             if "Valor" in consolidado_df.columns:
@@ -621,14 +949,18 @@ else:
                 pass
         return buffer.getvalue()
 
-    st.download_button(
-        "⬇️ Baixar Excel consolidado",
-        data=gerar_excel(),
-        file_name=f"dados_consolidados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
-
-    if st.button("🗑️ Limpar tudo"):
-        st.session_state.consolidado = []
-        st.rerun()
+    st.divider()
+    col_exportar, col_limpar = st.columns([3, 1])
+    with col_exportar:
+        st.download_button(
+            "⬇️ Baixar Excel consolidado",
+            data=gerar_excel(),
+            file_name=f"dados_consolidados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+    with col_limpar:
+        if st.button("🗑️ Limpar tudo", use_container_width=True):
+            st.session_state.consolidado = []
+            st.rerun()
