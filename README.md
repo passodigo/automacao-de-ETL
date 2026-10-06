@@ -47,9 +47,9 @@ O seu navegador padrão abrirá automaticamente na porta local da aplicação (g
 
 📖 Guia de Uso
 Passo 1: Seleção do Modo e Upload
-```
+
 Na barra lateral esquerda, escolha se deseja fazer um ETL Genérico ou extrair a Matriz Orçamentária (Comitês x Programas). Em seguida, faça o upload do arquivo .pdf.
-```
+
 Passo 2: Navegação e Otimização
 
     Selecione a página desejada. O sistema processa o PDF página por página sob demanda (Lazy Loading) para economizar memória.
